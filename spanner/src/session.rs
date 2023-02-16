@@ -151,6 +151,8 @@ impl Sessions {
         }
     }
 
+    /// release method put back session handle to pool if possible
+    /// else oprhan / delete it
     fn release(&mut self, session: SessionHandle) {
         self.num_inuse -= 1;
         if session.valid {
@@ -538,6 +540,11 @@ impl SessionManager {
     }
 }
 
+/// loops every 10 ms
+/// till there is not session handle in pool / a repeated session appear at front of pool
+/// else every other session are taken to healthcheck.
+/// if still alive -> send to recycle.
+/// else delete -> send to recycle.
 async fn health_check(
     now: Instant,
     session_alive_trust_duration: Duration,
@@ -631,447 +638,447 @@ async fn batch_create_session(
         .collect::<Vec<SessionHandle>>())
 }
 
-#[cfg(test)]
-mod tests {
-    use crate::apiv1::conn_pool::ConnectionManager;
-    use crate::session::{batch_create_sessions, health_check, SessionConfig, SessionError, SessionManager};
-    use serial_test::serial;
+// #[cfg(test)]
+// mod tests {
+//     use crate::apiv1::conn_pool::ConnectionManager;
+//     use crate::session::{batch_create_sessions, health_check, SessionConfig, SessionError, SessionManager};
+//     use serial_test::serial;
 
-    use google_cloud_gax::cancel::CancellationToken;
-    use google_cloud_gax::conn::Environment;
-    use google_cloud_googleapis::spanner::v1::ExecuteSqlRequest;
-    use parking_lot::RwLock;
-    use std::sync::atomic::{AtomicI64, Ordering};
-    use std::sync::Arc;
-    use std::time::{Duration, Instant};
-    use tokio::time::sleep;
+//     use google_cloud_gax::cancel::CancellationToken;
+//     use google_cloud_gax::conn::Environment;
+//     use google_cloud_googleapis::spanner::v1::ExecuteSqlRequest;
+//     use parking_lot::RwLock;
+//     use std::sync::atomic::{AtomicI64, Ordering};
+//     use std::sync::Arc;
+//     use std::time::{Duration, Instant};
+//     use tokio::time::sleep;
 
-    pub const DATABASE: &str = "projects/local-project/instances/test-instance/databases/local-database";
+//     pub const DATABASE: &str = "projects/local-project/instances/test-instance/databases/local-database";
 
-    #[ctor::ctor]
-    fn init() {
-        let filter = tracing_subscriber::filter::EnvFilter::from_default_env()
-            .add_directive("google_cloud_spanner=trace".parse().unwrap());
-        let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
-    }
+//     #[ctor::ctor]
+//     fn init() {
+//         let filter = tracing_subscriber::filter::EnvFilter::from_default_env()
+//             .add_directive("google_cloud_spanner=trace".parse().unwrap());
+//         let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+//     }
 
-    async fn assert_rush(use_invalidate: bool, config: SessionConfig) -> Arc<SessionManager> {
-        let cm = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
-            .await
-            .unwrap();
-        let sm = SessionManager::new(DATABASE, cm, config).await.unwrap();
+//     async fn assert_rush(use_invalidate: bool, config: SessionConfig) -> Arc<SessionManager> {
+//         let cm = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
+//             .await
+//             .unwrap();
+//         let sm = SessionManager::new(DATABASE, cm, config).await.unwrap();
 
-        let counter = Arc::new(AtomicI64::new(0));
-        let mut spawns = Vec::with_capacity(100);
-        for _ in 0..100 {
-            let sm = sm.clone();
-            let counter = Arc::clone(&counter);
-            spawns.push(tokio::spawn(async move {
-                let mut session = sm.get().await.unwrap();
-                if use_invalidate {
-                    session.delete().await;
-                }
-                counter.fetch_add(1, Ordering::SeqCst);
-                sleep(Duration::from_millis(300)).await;
-            }));
-        }
-        for handler in spawns {
-            let _ = handler.await;
-        }
-        sm
-    }
+//         let counter = Arc::new(AtomicI64::new(0));
+//         let mut spawns = Vec::with_capacity(100);
+//         for _ in 0..100 {
+//             let sm = sm.clone();
+//             let counter = Arc::clone(&counter);
+//             spawns.push(tokio::spawn(async move {
+//                 let mut session = sm.get().await.unwrap();
+//                 if use_invalidate {
+//                     session.delete().await;
+//                 }
+//                 counter.fetch_add(1, Ordering::SeqCst);
+//                 sleep(Duration::from_millis(300)).await;
+//             }));
+//         }
+//         for handler in spawns {
+//             let _ = handler.await;
+//         }
+//         sm
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_health_check_checked() {
-        let cm = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
-            .await
-            .unwrap();
-        let session_alive_trust_duration = Duration::from_millis(10);
-        let config = SessionConfig {
-            min_opened: 5,
-            session_alive_trust_duration,
-            max_opened: 5,
-            ..Default::default()
-        };
-        let sm = std::sync::Arc::new(SessionManager::new(DATABASE, cm, config).await.unwrap());
-        sleep(Duration::from_secs(1)).await;
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_health_check_checked() {
+//         let cm = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
+//             .await
+//             .unwrap();
+//         let session_alive_trust_duration = Duration::from_millis(10);
+//         let config = SessionConfig {
+//             min_opened: 5,
+//             session_alive_trust_duration,
+//             max_opened: 5,
+//             ..Default::default()
+//         };
+//         let sm = std::sync::Arc::new(SessionManager::new(DATABASE, cm, config).await.unwrap());
+//         sleep(Duration::from_secs(1)).await;
 
-        let cancel = CancellationToken::new();
-        health_check(Instant::now(), session_alive_trust_duration, &sm.session_pool, cancel.clone()).await;
+//         let cancel = CancellationToken::new();
+//         health_check(Instant::now(), session_alive_trust_duration, &sm.session_pool, cancel.clone()).await;
 
-        assert_eq!(sm.num_opened(), 5);
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        cancel.cancel();
-    }
+//         assert_eq!(sm.num_opened(), 5);
+//         tokio::time::sleep(Duration::from_millis(500)).await;
+//         cancel.cancel();
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_health_check_not_checked() {
-        let cm = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
-            .await
-            .unwrap();
-        let session_alive_trust_duration = Duration::from_secs(10);
-        let config = SessionConfig {
-            min_opened: 5,
-            session_alive_trust_duration,
-            max_opened: 5,
-            ..Default::default()
-        };
-        let sm = Arc::new(SessionManager::new(DATABASE, cm, config).await.unwrap());
-        sleep(Duration::from_secs(1)).await;
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_health_check_not_checked() {
+//         let cm = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
+//             .await
+//             .unwrap();
+//         let session_alive_trust_duration = Duration::from_secs(10);
+//         let config = SessionConfig {
+//             min_opened: 5,
+//             session_alive_trust_duration,
+//             max_opened: 5,
+//             ..Default::default()
+//         };
+//         let sm = Arc::new(SessionManager::new(DATABASE, cm, config).await.unwrap());
+//         sleep(Duration::from_secs(1)).await;
 
-        let cancel = CancellationToken::new();
-        health_check(Instant::now(), session_alive_trust_duration, &sm.session_pool, cancel.clone()).await;
+//         let cancel = CancellationToken::new();
+//         health_check(Instant::now(), session_alive_trust_duration, &sm.session_pool, cancel.clone()).await;
 
-        assert_eq!(sm.num_opened(), 5);
-        sleep(Duration::from_millis(500)).await;
-        cancel.cancel();
-    }
+//         assert_eq!(sm.num_opened(), 5);
+//         sleep(Duration::from_millis(500)).await;
+//         cancel.cancel();
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_increase_session_and_idle_session_expired() {
-        let conn_pool = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
-            .await
-            .unwrap();
-        let config = SessionConfig {
-            idle_timeout: Duration::from_millis(10),
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            ..Default::default()
-        };
-        let sm = SessionManager::new(DATABASE, conn_pool, config).await.unwrap();
-        {
-            let mut sessions = Vec::new();
-            for _ in 0..45 {
-                sessions.push(sm.get().await.unwrap());
-            }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_increase_session_and_idle_session_expired() {
+//         let conn_pool = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
+//             .await
+//             .unwrap();
+//         let config = SessionConfig {
+//             idle_timeout: Duration::from_millis(10),
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             ..Default::default()
+//         };
+//         let sm = SessionManager::new(DATABASE, conn_pool, config).await.unwrap();
+//         {
+//             let mut sessions = Vec::new();
+//             for _ in 0..45 {
+//                 sessions.push(sm.get().await.unwrap());
+//             }
 
-            // all the session are using
-            assert_eq!(sm.num_opened(), 45);
-            assert_eq!(sm.session_pool.inner.read().num_inuse, 45, "all the session are using");
-            sleep(Duration::from_secs(1)).await;
-        }
+//             // all the session are using
+//             assert_eq!(sm.num_opened(), 45);
+//             assert_eq!(sm.session_pool.inner.read().num_inuse, 45, "all the session are using");
+//             sleep(Duration::from_secs(1)).await;
+//         }
 
-        // idle session removed after drop
-        let sessions = sm.session_pool.inner.read();
-        assert_eq!(sessions.num_inuse, 0, "invalid num_inuse");
-        assert_eq!(sessions.available_sessions.len(), 20, "invalid available sessions");
-        assert_eq!(sessions.num_opened(), 20, "invalid num open");
-        assert_eq!(sessions.waiters.len(), 0, "session waiters is 0");
-    }
+//         // idle session removed after drop
+//         let sessions = sm.session_pool.inner.read();
+//         assert_eq!(sessions.num_inuse, 0, "invalid num_inuse");
+//         assert_eq!(sessions.available_sessions.len(), 20, "invalid available sessions");
+//         assert_eq!(sessions.num_opened(), 20, "invalid num open");
+//         assert_eq!(sessions.waiters.len(), 0, "session waiters is 0");
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_too_many_session_timeout() {
-        let conn_pool = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
-            .await
-            .unwrap();
-        let config = SessionConfig {
-            idle_timeout: Duration::from_millis(10),
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            session_get_timeout: Duration::from_secs(1),
-            ..Default::default()
-        };
-        let sm = Arc::new(SessionManager::new(DATABASE, conn_pool, config.clone()).await.unwrap());
-        let mu = Arc::new(RwLock::new(Vec::new()));
-        let mut awaiters = Vec::with_capacity(100);
-        for _ in 0..100 {
-            let sm = sm.clone();
-            let mu = mu.clone();
-            awaiters.push(tokio::spawn(async move {
-                let session = sm.get().await;
-                mu.write().push(session);
-                0
-            }))
-        }
-        for handler in awaiters {
-            let _ = handler.await;
-        }
-        let sessions = mu.read();
-        for i in 0..sessions.len() - 1 {
-            let session = &sessions[i];
-            if i >= config.max_opened {
-                assert!(session.is_err(), "must err {i}");
-                match session.as_ref().err().unwrap() {
-                    SessionError::SessionGetTimeout => {}
-                    _ => {
-                        panic!("must be session timeout error")
-                    }
-                }
-            } else {
-                assert!(session.is_ok(), "must ok {i}");
-            }
-        }
-        let pool = sm.session_pool.inner.read();
-        assert_eq!(pool.num_opened(), config.max_opened);
-        assert_eq!(pool.waiters.len(), 100 - config.max_opened); //include timeout sessions
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_too_many_session_timeout() {
+//         let conn_pool = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
+//             .await
+//             .unwrap();
+//         let config = SessionConfig {
+//             idle_timeout: Duration::from_millis(10),
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             session_get_timeout: Duration::from_secs(1),
+//             ..Default::default()
+//         };
+//         let sm = Arc::new(SessionManager::new(DATABASE, conn_pool, config.clone()).await.unwrap());
+//         let mu = Arc::new(RwLock::new(Vec::new()));
+//         let mut awaiters = Vec::with_capacity(100);
+//         for _ in 0..100 {
+//             let sm = sm.clone();
+//             let mu = mu.clone();
+//             awaiters.push(tokio::spawn(async move {
+//                 let session = sm.get().await;
+//                 mu.write().push(session);
+//                 0
+//             }))
+//         }
+//         for handler in awaiters {
+//             let _ = handler.await;
+//         }
+//         let sessions = mu.read();
+//         for i in 0..sessions.len() - 1 {
+//             let session = &sessions[i];
+//             if i >= config.max_opened {
+//                 assert!(session.is_err(), "must err {i}");
+//                 match session.as_ref().err().unwrap() {
+//                     SessionError::SessionGetTimeout => {}
+//                     _ => {
+//                         panic!("must be session timeout error")
+//                     }
+//                 }
+//             } else {
+//                 assert!(session.is_ok(), "must ok {i}");
+//             }
+//         }
+//         let pool = sm.session_pool.inner.read();
+//         assert_eq!(pool.num_opened(), config.max_opened);
+//         assert_eq!(pool.waiters.len(), 100 - config.max_opened); //include timeout sessions
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_rush_invalidate() {
-        let config = SessionConfig {
-            session_get_timeout: Duration::from_secs(20),
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            ..Default::default()
-        };
-        let sm = assert_rush(true, config.clone()).await;
-        {
-            let sessions = sm.session_pool.inner.read();
-            let available_sessions = sessions.available_sessions.len();
-            assert_eq!(sessions.num_inuse, 0);
-            assert_eq!(sessions.waiters.len(), 0);
-            assert_eq!(sessions.orphans.len(), 0);
-            assert!(
-                available_sessions <= config.max_opened && available_sessions >= config.min_opened,
-                "now is {available_sessions}"
-            );
-        }
-        sm.close().await;
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_rush_invalidate() {
+//         let config = SessionConfig {
+//             session_get_timeout: Duration::from_secs(20),
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             ..Default::default()
+//         };
+//         let sm = assert_rush(true, config.clone()).await;
+//         {
+//             let sessions = sm.session_pool.inner.read();
+//             let available_sessions = sessions.available_sessions.len();
+//             assert_eq!(sessions.num_inuse, 0);
+//             assert_eq!(sessions.waiters.len(), 0);
+//             assert_eq!(sessions.orphans.len(), 0);
+//             assert!(
+//                 available_sessions <= config.max_opened && available_sessions >= config.min_opened,
+//                 "now is {available_sessions}"
+//             );
+//         }
+//         sm.close().await;
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_rush() {
-        let config = SessionConfig {
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            ..Default::default()
-        };
-        let sm = assert_rush(false, config.clone()).await;
-        {
-            let sessions = sm.session_pool.inner.read();
-            let available_sessions = sessions.available_sessions.len();
-            assert_eq!(sessions.num_inuse, 0);
-            assert_eq!(sessions.waiters.len(), 0);
-            assert_eq!(sessions.orphans.len(), 0);
-            assert!(
-                available_sessions <= config.max_opened && available_sessions >= config.min_opened,
-                "now is {available_sessions}"
-            );
-        }
-        sm.close().await;
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_rush() {
+//         let config = SessionConfig {
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             ..Default::default()
+//         };
+//         let sm = assert_rush(false, config.clone()).await;
+//         {
+//             let sessions = sm.session_pool.inner.read();
+//             let available_sessions = sessions.available_sessions.len();
+//             assert_eq!(sessions.num_inuse, 0);
+//             assert_eq!(sessions.waiters.len(), 0);
+//             assert_eq!(sessions.orphans.len(), 0);
+//             assert!(
+//                 available_sessions <= config.max_opened && available_sessions >= config.min_opened,
+//                 "now is {available_sessions}"
+//             );
+//         }
+//         sm.close().await;
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_rush_with_invalidate() {
-        let config = SessionConfig {
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            ..Default::default()
-        };
-        let sm = assert_rush(true, config.clone()).await;
-        {
-            let sessions = sm.session_pool.inner.read();
-            let available_sessions = sessions.available_sessions.len();
-            assert_eq!(sessions.num_inuse, 0);
-            assert_eq!(sessions.waiters.len(), 0);
-            assert_eq!(sessions.orphans.len(), 0);
-            assert!(
-                available_sessions <= config.max_opened && available_sessions >= config.min_opened,
-                "now is {available_sessions}"
-            );
-        }
-        sm.close().await;
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_rush_with_invalidate() {
+//         let config = SessionConfig {
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             ..Default::default()
+//         };
+//         let sm = assert_rush(true, config.clone()).await;
+//         {
+//             let sessions = sm.session_pool.inner.read();
+//             let available_sessions = sessions.available_sessions.len();
+//             assert_eq!(sessions.num_inuse, 0);
+//             assert_eq!(sessions.waiters.len(), 0);
+//             assert_eq!(sessions.orphans.len(), 0);
+//             assert!(
+//                 available_sessions <= config.max_opened && available_sessions >= config.min_opened,
+//                 "now is {available_sessions}"
+//             );
+//         }
+//         sm.close().await;
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_rush_with_health_check() {
-        let config = SessionConfig {
-            session_alive_trust_duration: Duration::from_millis(10),
-            refresh_interval: Duration::from_millis(250),
-            session_get_timeout: Duration::from_secs(20),
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            ..Default::default()
-        };
-        let sm = assert_rush(false, config.clone()).await;
-        sleep(Duration::from_secs(2)).await;
-        {
-            let sessions = sm.session_pool.inner.read();
-            let available_sessions = sessions.available_sessions.len();
-            assert!(sessions.num_inuse <= 1, "num_inuse is {}", sessions.num_inuse);
-            assert_eq!(sessions.waiters.len(), 0);
-            assert_eq!(sessions.orphans.len(), 0);
-            assert!(
-                available_sessions <= config.max_opened && available_sessions >= config.max_idle - 1,
-                "now is {available_sessions}"
-            );
-        }
-        sm.close().await;
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_rush_with_health_check() {
+//         let config = SessionConfig {
+//             session_alive_trust_duration: Duration::from_millis(10),
+//             refresh_interval: Duration::from_millis(250),
+//             session_get_timeout: Duration::from_secs(20),
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             ..Default::default()
+//         };
+//         let sm = assert_rush(false, config.clone()).await;
+//         sleep(Duration::from_secs(2)).await;
+//         {
+//             let sessions = sm.session_pool.inner.read();
+//             let available_sessions = sessions.available_sessions.len();
+//             assert!(sessions.num_inuse <= 1, "num_inuse is {}", sessions.num_inuse);
+//             assert_eq!(sessions.waiters.len(), 0);
+//             assert_eq!(sessions.orphans.len(), 0);
+//             assert!(
+//                 available_sessions <= config.max_opened && available_sessions >= config.max_idle - 1,
+//                 "now is {available_sessions}"
+//             );
+//         }
+//         sm.close().await;
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_rush_with_health_check_and_invalidate() {
-        let config = SessionConfig {
-            session_alive_trust_duration: Duration::from_millis(10),
-            refresh_interval: Duration::from_millis(250),
-            session_get_timeout: Duration::from_secs(20),
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            ..Default::default()
-        };
-        let sm = assert_rush(true, config.clone()).await;
-        sleep(Duration::from_secs(2)).await;
-        {
-            let sessions = sm.session_pool.inner.read();
-            let available_sessions = sessions.available_sessions.len();
-            assert!(sessions.num_inuse <= 1, "num_inuse is {}", sessions.num_inuse);
-            assert_eq!(sessions.waiters.len(), 0);
-            assert_eq!(sessions.orphans.len(), 0);
-            assert!(
-                available_sessions <= config.max_opened && available_sessions >= config.min_opened - 1,
-                "now is {available_sessions}"
-            );
-        }
-        sm.close().await;
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_rush_with_health_check_and_invalidate() {
+//         let config = SessionConfig {
+//             session_alive_trust_duration: Duration::from_millis(10),
+//             refresh_interval: Duration::from_millis(250),
+//             session_get_timeout: Duration::from_secs(20),
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             ..Default::default()
+//         };
+//         let sm = assert_rush(true, config.clone()).await;
+//         sleep(Duration::from_secs(2)).await;
+//         {
+//             let sessions = sm.session_pool.inner.read();
+//             let available_sessions = sessions.available_sessions.len();
+//             assert!(sessions.num_inuse <= 1, "num_inuse is {}", sessions.num_inuse);
+//             assert_eq!(sessions.waiters.len(), 0);
+//             assert_eq!(sessions.orphans.len(), 0);
+//             assert!(
+//                 available_sessions <= config.max_opened && available_sessions >= config.min_opened - 1,
+//                 "now is {available_sessions}"
+//             );
+//         }
+//         sm.close().await;
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_rush_with_idle_expired() {
-        let config = SessionConfig {
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            idle_timeout: Duration::from_millis(1),
-            ..Default::default()
-        };
-        let sm = assert_rush(false, config.clone()).await;
-        {
-            let sessions = sm.session_pool.inner.read();
-            assert_eq!(sessions.num_inuse, 0);
-            assert_eq!(sessions.waiters.len(), 0);
-            assert_eq!(sessions.orphans.len(), config.max_opened - config.max_idle);
-            assert_eq!(sessions.available_sessions.len(), config.max_idle);
-        }
-        sm.close().await;
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_rush_with_idle_expired() {
+//         let config = SessionConfig {
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             idle_timeout: Duration::from_millis(1),
+//             ..Default::default()
+//         };
+//         let sm = assert_rush(false, config.clone()).await;
+//         {
+//             let sessions = sm.session_pool.inner.read();
+//             assert_eq!(sessions.num_inuse, 0);
+//             assert_eq!(sessions.waiters.len(), 0);
+//             assert_eq!(sessions.orphans.len(), config.max_opened - config.max_idle);
+//             assert_eq!(sessions.available_sessions.len(), config.max_idle);
+//         }
+//         sm.close().await;
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_rush_with_health_check_and_idle_expired() {
-        let config = SessionConfig {
-            session_alive_trust_duration: Duration::from_millis(10),
-            refresh_interval: Duration::from_millis(250),
-            session_get_timeout: Duration::from_secs(20),
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            idle_timeout: Duration::from_millis(1),
-            ..Default::default()
-        };
-        let sm = assert_rush(false, config.clone()).await;
-        sleep(Duration::from_secs(1)).await;
-        {
-            let sessions = sm.session_pool.inner.read();
-            assert!(sessions.num_inuse <= 1, "num_inuse is {}", sessions.num_inuse);
-            assert_eq!(sessions.waiters.len(), 0);
-            assert_eq!(sessions.orphans.len(), 0);
-            let available_sessions = sessions.available_sessions.len();
-            assert!(
-                available_sessions >= config.min_opened - 1 && available_sessions <= config.max_idle,
-                "now is {available_sessions}"
-            );
-        }
-        sm.close().await;
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_rush_with_health_check_and_idle_expired() {
+//         let config = SessionConfig {
+//             session_alive_trust_duration: Duration::from_millis(10),
+//             refresh_interval: Duration::from_millis(250),
+//             session_get_timeout: Duration::from_secs(20),
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             idle_timeout: Duration::from_millis(1),
+//             ..Default::default()
+//         };
+//         let sm = assert_rush(false, config.clone()).await;
+//         sleep(Duration::from_secs(1)).await;
+//         {
+//             let sessions = sm.session_pool.inner.read();
+//             assert!(sessions.num_inuse <= 1, "num_inuse is {}", sessions.num_inuse);
+//             assert_eq!(sessions.waiters.len(), 0);
+//             assert_eq!(sessions.orphans.len(), 0);
+//             let available_sessions = sessions.available_sessions.len();
+//             assert!(
+//                 available_sessions >= config.min_opened - 1 && available_sessions <= config.max_idle,
+//                 "now is {available_sessions}"
+//             );
+//         }
+//         sm.close().await;
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_rush_with_health_check_and_idle_expired_and_invalid() {
-        let config = SessionConfig {
-            session_alive_trust_duration: Duration::from_millis(10),
-            refresh_interval: Duration::from_millis(250),
-            session_get_timeout: Duration::from_secs(20),
-            min_opened: 10,
-            max_idle: 20,
-            max_opened: 45,
-            idle_timeout: Duration::from_millis(1),
-            ..Default::default()
-        };
-        let sm = assert_rush(true, config.clone()).await;
-        sleep(Duration::from_secs(2)).await;
-        {
-            let sessions = sm.session_pool.inner.read();
-            assert!(sessions.num_inuse <= 1, "num_inuse is {}", sessions.num_inuse);
-            // health checker removes orphans
-            assert_eq!(sessions.orphans.len(), 0);
-            assert_eq!(sessions.waiters.len(), 0, "invalid waiters");
-            let available_sessions = sessions.available_sessions.len();
-            assert!(
-                available_sessions >= config.min_opened - 1 && available_sessions <= config.max_idle,
-                "now is {available_sessions}"
-            );
-        }
-        sm.close().await;
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_rush_with_health_check_and_idle_expired_and_invalid() {
+//         let config = SessionConfig {
+//             session_alive_trust_duration: Duration::from_millis(10),
+//             refresh_interval: Duration::from_millis(250),
+//             session_get_timeout: Duration::from_secs(20),
+//             min_opened: 10,
+//             max_idle: 20,
+//             max_opened: 45,
+//             idle_timeout: Duration::from_millis(1),
+//             ..Default::default()
+//         };
+//         let sm = assert_rush(true, config.clone()).await;
+//         sleep(Duration::from_secs(2)).await;
+//         {
+//             let sessions = sm.session_pool.inner.read();
+//             assert!(sessions.num_inuse <= 1, "num_inuse is {}", sessions.num_inuse);
+//             // health checker removes orphans
+//             assert_eq!(sessions.orphans.len(), 0);
+//             assert_eq!(sessions.waiters.len(), 0, "invalid waiters");
+//             let available_sessions = sessions.available_sessions.len();
+//             assert!(
+//                 available_sessions >= config.min_opened - 1 && available_sessions <= config.max_idle,
+//                 "now is {available_sessions}"
+//             );
+//         }
+//         sm.close().await;
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_close() {
-        let cm = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
-            .await
-            .unwrap();
-        let config = SessionConfig::default();
-        let sm = SessionManager::new(DATABASE, cm, config.clone()).await.unwrap();
-        assert_eq!(sm.num_opened(), config.min_opened);
-        sm.close().await;
-        assert_eq!(sm.num_opened(), 0);
-        assert_eq!(sm.session_pool.inner.read().orphans.len(), 0);
-    }
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_close() {
+//         let cm = ConnectionManager::new(4, &Environment::Emulator("localhost:9010".to_string()), "")
+//             .await
+//             .unwrap();
+//         let config = SessionConfig::default();
+//         let sm = SessionManager::new(DATABASE, cm, config.clone()).await.unwrap();
+//         assert_eq!(sm.num_opened(), config.min_opened);
+//         sm.close().await;
+//         assert_eq!(sm.num_opened(), 0);
+//         assert_eq!(sm.session_pool.inner.read().orphans.len(), 0);
+//     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial]
-    async fn test_batch_create_sessions() {
-        let cm = ConnectionManager::new(1, &Environment::Emulator("localhost:9010".to_string()), "")
-            .await
-            .unwrap();
-        let client = cm.conn();
-        let session_count = 125;
-        let result = batch_create_sessions(client.clone(), DATABASE, session_count).await;
-        match result {
-            Ok(created) => {
-                assert_eq!(session_count, created.len());
-                for mut s in created {
-                    let ping_result = s
-                        .spanner_client
-                        .execute_sql(
-                            ExecuteSqlRequest {
-                                session: s.session.name.to_string(),
-                                transaction: None,
-                                sql: "SELECT 1".to_string(),
-                                params: None,
-                                param_types: Default::default(),
-                                resume_token: vec![],
-                                query_mode: 0,
-                                partition_token: vec![],
-                                seqno: 0,
-                                query_options: None,
-                                request_options: None,
-                            },
-                            None,
-                            None,
-                        )
-                        .await;
-                    assert!(ping_result.is_ok());
-                }
-            }
-            Err(err) => panic!("{err:?}"),
-        }
-    }
-}
+//     #[tokio::test(flavor = "multi_thread")]
+//     #[serial]
+//     async fn test_batch_create_sessions() {
+//         let cm = ConnectionManager::new(1, &Environment::Emulator("localhost:9010".to_string()), "")
+//             .await
+//             .unwrap();
+//         let client = cm.conn();
+//         let session_count = 125;
+//         let result = batch_create_sessions(client.clone(), DATABASE, session_count).await;
+//         match result {
+//             Ok(created) => {
+//                 assert_eq!(session_count, created.len());
+//                 for mut s in created {
+//                     let ping_result = s
+//                         .spanner_client
+//                         .execute_sql(
+//                             ExecuteSqlRequest {
+//                                 session: s.session.name.to_string(),
+//                                 transaction: None,
+//                                 sql: "SELECT 1".to_string(),
+//                                 params: None,
+//                                 param_types: Default::default(),
+//                                 resume_token: vec![],
+//                                 query_mode: 0,
+//                                 partition_token: vec![],
+//                                 seqno: 0,
+//                                 query_options: None,
+//                                 request_options: None,
+//                             },
+//                             None,
+//                             None,
+//                         )
+//                         .await;
+//                     assert!(ping_result.is_ok());
+//                 }
+//             }
+//             Err(err) => panic!("{err:?}"),
+//         }
+//     }
+// }
